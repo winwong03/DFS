@@ -1,0 +1,1010 @@
+From f64acfa21e668e7fbc93177dc7c91d7fb3240939 Mon Sep 17 00:00:00 2001
+From: Winnie Wong <winwong03@gmail.com>
+Date: Tue, 27 Mar 2018 15:07:21 -0700
+Subject: [PATCH] fixes for re-grading
+
+---
+ dfslib/dfslib.go | 513 ++++++++++++++++++++++++++++---------------------------
+ server.go        | 148 +++++++++-------
+ shared/shared.go |   4 +-
+ 3 files changed, 344 insertions(+), 321 deletions(-)
+
+diff --git a/dfslib/dfslib.go b/dfslib/dfslib.go
+index e7d931b..70f4f49 100644
+--- a/dfslib/dfslib.go
++++ b/dfslib/dfslib.go
+@@ -17,8 +17,8 @@ import (
+ 	"os"
+ 	"time"
+ 	"unicode"
+-//    "strings"
+-    "path/filepath"
++	//    "strings"
++	"path/filepath"
+ 
+ 	"../shared"
+ )
+@@ -192,14 +192,14 @@ func isAlphaNumeric(fname string) bool {
+ 
+ // DFSInstance will do the RPC call using client.call("DFSServer.Method", args, reply)
+ type DFSInstance struct {
+-	Client     *rpc.Client // To call server
+-	Server     *rpc.Server // To receive msgs from server
+-	LocalPath  string
+-	IPAddr     string
+-	ServerAddr string
+-	Connected  bool
+-	Heartbeat  *net.UDPConn
+-    FilesOpened []*OpenFile
++	Client      *rpc.Client // To call server
++	Server      *rpc.Server // To receive msgs from server
++	LocalPath   string
++	IPAddr      string
++	ServerAddr  string
++	Connected   bool
++	Heartbeat   *net.UDPConn
++	FilesOpened []*OpenFile
+ }
+ 
+ func (dfs *DFSInstance) SendUDPHeartbeat(fname string) (exists bool, err error) {
+@@ -213,7 +213,7 @@ func (dfs *DFSInstance) SendUDPHeartbeat(fname string) (exists bool, err error)
+ 		currentTime := time.Now()
+ 		beat := &shared.Heartbeat{
+ 			LocalPath: dfs.LocalPath,
+-			TimeSent:  currentTime,
++			TimeSent:  currentTime.UnixNano(),
+ 		}
+ 		msg, err := json.Marshal(beat)
+ 		if err != nil {
+@@ -281,7 +281,6 @@ func (dfs *DFSInstance) GlobalFileExists(fname string) (exists bool, err error)
+ // Opens the file if already there otherwise creates one
+ func (dfs *DFSInstance) Open(fname string, mode FileMode) (f DFSFile, err error) {
+ 
+-
+ 	// Check validity of fname
+ 	nameLength := len(fname)
+ 	if nameLength < 1 || nameLength > 16 {
+@@ -295,11 +294,11 @@ func (dfs *DFSInstance) Open(fname string, mode FileMode) (f DFSFile, err error)
+ 	var fileToChange *os.File
+ 	var versions [256]int
+ 
+-    // Get full path of file
++	// Get full path of file
+ 	ext := fmt.Sprintf("%s.dfs", fname)
+-    fullFilename := filepath.Join(dfs.LocalPath, ext)
++	fullFilename := filepath.Join(dfs.LocalPath, ext)
+ 
+-    // Check if file exists locally
++	// Check if file exists locally
+ 	exists, _ := dfs.LocalFileExists(fullFilename)
+ 
+ 	// If DREAD, return FileDoesNotExistError if file doesnt exist
+@@ -308,182 +307,186 @@ func (dfs *DFSInstance) Open(fname string, mode FileMode) (f DFSFile, err error)
+ 			return nil, FileDoesNotExistError(fname)
+ 		}
+ 	} else if mode == READ || mode == WRITE {
+-        //If disconnected return DisconnectedError
+-        if !dfs.Connected {
+-            return nil, DisconnectedError(dfs.ServerAddr)
+-        }
+-
+-        // If mode == WRITE and somebody is already writing to file, return OpenWriteConflict
+-        // Otherwise tell server we're writing
+-        if mode == WRITE {
+-            var reply shared.Reply
+-            args := &shared.Args{
+-                LocalPath: dfs.LocalPath,
+-                Filename:  fname,
+-                Mode:      int(mode),
+-            }
+-            _ = dfs.Client.Call("DFSServerInstance.Writeable", args, &reply)
+-            if !reply.Writeable {
+-                return nil, OpenWriteConflictError(fname)
+-            }
+-        }
+-
+-        // Check if log file exists. If not, create and tell server
+-        logFilePath := filepath.Join(dfs.LocalPath, "log.dfs")
+-        logFileExists, _ := dfs.LocalFileExists(logFilePath)
+-
+-        if !logFileExists{
+-            // Create the file
+-            logFileName := filepath.Join(dfs.LocalPath, "log.dfs")
+-            log, err := os.Create(logFileName)
+-            log.Sync()
+-
+-            var reply shared.Reply
+-            args := &shared.Args{
+-                Filename:  "log",
+-                LocalPath: dfs.LocalPath,
+-                Versions:  versions,
+-            }
+-            // Update server that file exists
+-            err = dfs.Client.Call("DFSServerInstance.UpdateServer", args, &reply)
+-            if err != nil {
+-                //fmt.Println("Could not update server") //delete
+-            }
+-        }
+-
+-        // Check if global file exists and if client with file connected.
+-        //If not, return FileUnavailableError
+-        var reply shared.Reply
+-        args := &shared.Args{
+-            Filename:  fname,
+-            LocalPath: dfs.LocalPath,
+-        }
+-        err = dfs.Client.Call("DFSServerInstance.GlobalFileExists", args, &reply)
+-        globalExists := reply.Exists
+-
+-
+-        // If local file doesn't exist, create it
+-        if !exists {
+-            // Create the file
+-            fileToChange, err = os.Create(fullFilename)
+-            //fileToChange.Truncate(int64(256 * 32))
+-            fileToChange.Sync()
+-            fileToChange.Close()
+-
+-            var reply shared.Reply
+-            args := &shared.Args{
+-                Filename:  fname,
+-                LocalPath: dfs.LocalPath,
+-                Versions:  versions,
+-            }
+-            // Update server that file exists
+-            err = dfs.Client.Call("DFSServerInstance.UpdateServer", args, &reply)
+-            if err != nil {
+-                //fmt.Println("Could not update server") //delete
+-            }
+-        }
+-
+-        // Update local version if global and client files exists
+-        if globalExists{
+-            var reply shared.Reply
+-            err = dfs.Client.Call("DFSServerInstance.ClientFilesOnline", args, &reply)
+-            filesOnline := reply.Exists
+-            if !filesOnline {
+-                // Remove write access
+-                var reply shared.Reply
+-                args := &shared.Args{
+-                    Filename: fname,
+-                    LocalPath: dfs.LocalPath,
+-                }
+-                err = dfs.Client.Call("DFSServerInstance.RemoveAccess", args, &reply)
+-                return nil, FileUnavailableError(fname)
+-            }
+-
+-            // Since there are clients online, open file to get latest versions
+-            fileToChange, err = os.OpenFile(fullFilename, os.O_APPEND|os.O_RDWR, 0644)
+-
+-            // Get our version of file to compare with latest
+-            reply = shared.Reply{}
+-            args = &shared.Args{
+-                Filename:  fname,
+-                LocalPath: dfs.LocalPath,
+-            }
+-            _ = dfs.Client.Call("DFSServerInstance.Open", args, &reply)
+-            versions = reply.Versions
+-
+-            // Get the latest file from server
+-            // Update server that we have latest file
+-            reply = shared.Reply{}
+-            for index := 0; index < 256; index++ {
+-                // If not latest version, get chunk from server
+-                if reply.Version > versions[index] {
+-                    var reply shared.Reply
+-                    args := &shared.Args{
+-                        Filename:    fname,
+-                        LocalPath:   dfs.LocalPath,
+-                        BytesToRead: 32,
+-                        Offset:      index * 32,
+-                        Chunknum:    uint8(index),
+-                        Mode:        int(mode),
+-                    }
+-                    err = dfs.Client.Call("DFSServerInstance.Read", args, &reply)
+-                    if err != nil {
+-                        // Remove write access
+-                        var reply shared.Reply
+-                        args := &shared.Args{
+-                            Filename: fname,
+-                        }
+-                        err = dfs.Client.Call("DFSServerInstance.RemoveAccess", args, &reply)
+-                        return nil, ChunkUnavailableError(index)
+-                    }
+-
+-                    // Save chunk to file
+-                    _, err = fileToChange.WriteAt(reply.Chunk[:], int64(args.Offset))
+-                    if err != nil {
+-                    }
+-                    // Save read part to disk
+-                    fileToChange.Sync()
+-                }
+-            }
+-
+-            // update versioning of local file
+-            reply = shared.Reply{}
+-            args = &shared.Args{
+-                Filename:  fname,
+-                LocalPath: dfs.LocalPath,
+-            }
+-            _ = dfs.Client.Call("DFSServerInstance.Open", args, &reply)
+-            versions = reply.Versions
+-
+-            // Close the file to prevent opening twice
+-            fileToChange.Close()
+-        }
+-    }
+-
+-    // Return instance of file
+-    file, err = os.OpenFile(fullFilename, os.O_APPEND|os.O_RDWR, 0644)
+-    if err != nil {
+-        // Remove write access
+-        var reply shared.Reply
+-        args := &shared.Args{
+-            Filename: fname,
+-        }
+-        err = dfs.Client.Call("DFSServerInstance.RemoveAccess", args, &reply)
+-        return nil, FileDoesNotExistError(fname)
+-    }
+-
+-    openFile := &OpenFile{
+-        Name:      fname,
+-        File:      file,
+-        Mode:      mode,
+-        Connected: dfs.Connected,
+-        Server:    dfs.ServerAddr,
+-        Versions:  versions,
+-        Client:    dfs.Client,
+-        LocalPath: dfs.LocalPath,
+-    }
+-
+-    dfs.FilesOpened = append(dfs.FilesOpened, openFile)
++		//If disconnected return DisconnectedError
++		if !dfs.Connected {
++			return nil, DisconnectedError(dfs.ServerAddr)
++		}
++
++		// If mode == WRITE and somebody is already writing to file, return OpenWriteConflict
++		// Otherwise tell server we're writing
++		if mode == WRITE {
++			var reply shared.Reply
++			args := &shared.Args{
++				LocalPath: dfs.LocalPath,
++				Filename:  fname,
++				Mode:      int(mode),
++			}
++			_ = dfs.Client.Call("DFSServerInstance.Writeable", args, &reply)
++			if !reply.Writeable {
++				return nil, OpenWriteConflictError(fname)
++			}
++		}
++
++		// Check if log file exists. If not, create and tell server
++		logFilePath := filepath.Join(dfs.LocalPath, "log.dfs")
++		logFileExists, _ := dfs.LocalFileExists(logFilePath)
++
++		if !logFileExists {
++			// Create the file
++			logFileName := filepath.Join(dfs.LocalPath, "log.dfs")
++			log, err := os.Create(logFileName)
++			log.Sync()
++
++			var reply shared.Reply
++			args := &shared.Args{
++				Filename:  "log",
++				LocalPath: dfs.LocalPath,
++				Versions:  versions,
++			}
++			// Update server that file exists
++			err = dfs.Client.Call("DFSServerInstance.UpdateServer", args, &reply)
++			if err != nil {
++				//fmt.Println("Could not update server") //delete
++			}
++		}
++
++		// Check if global file exists and if client with file connected.
++		//If not, return FileUnavailableError
++		var reply shared.Reply
++		args := &shared.Args{
++			Filename:  fname,
++			LocalPath: dfs.LocalPath,
++		}
++		err = dfs.Client.Call("DFSServerInstance.GlobalFileExists", args, &reply)
++		globalExists := reply.Exists
++
++		// If local file doesn't exist, create it
++		if !exists {
++			// Create the file
++			fileToChange, err = os.Create(fullFilename)
++			fileToChange.Truncate(int64(256 * 32))
++			fileToChange.Sync()
++			fileToChange.Close()
++
++			var reply shared.Reply
++			args := &shared.Args{
++				Filename:  fname,
++				LocalPath: dfs.LocalPath,
++				Versions:  versions,
++			}
++			// Update server that file exists
++			err = dfs.Client.Call("DFSServerInstance.UpdateServer", args, &reply)
++			if err != nil {
++				//fmt.Println("Could not update server") //delete
++			}
++		}
++
++		// Update local version if global and client files exists
++		if globalExists {
++			args := &shared.Args{
++				Filename:  fname,
++				LocalPath: dfs.LocalPath,
++			}
++			var reply shared.Reply
++			err = dfs.Client.Call("DFSServerInstance.ClientFilesOnline", args, &reply)
++			filesOnline := reply.Exists
++			fmt.Printf("Global files exists. Are client files online:%s\n", filesOnline)
++			if !filesOnline {
++				// Remove write access
++				var reply shared.Reply
++				args := &shared.Args{
++					Filename:  fname,
++					LocalPath: dfs.LocalPath,
++				}
++				err = dfs.Client.Call("DFSServerInstance.RemoveAccess", args, &reply)
++				return nil, FileUnavailableError(fname)
++			}
++
++			// Since there are clients online, open file to get latest versions
++			fileToChange, err = os.OpenFile(fullFilename, os.O_RDWR, 0644)
++
++			// Get our version of file to compare with latest
++			reply = shared.Reply{}
++			args = &shared.Args{
++				Filename:  fname,
++				LocalPath: dfs.LocalPath,
++			}
++			_ = dfs.Client.Call("DFSServerInstance.Open", args, &reply)
++			versions = reply.Versions
++
++			// Get the latest file from server
++			// Update server that we have latest file
++			reply = shared.Reply{}
++			for index := 0; index < 256; index++ {
++				// If not latest version, get chunk from server
++				if reply.Version > versions[index] {
++					var reply shared.Reply
++					args := &shared.Args{
++						Filename:    fname,
++						LocalPath:   dfs.LocalPath,
++						BytesToRead: 32,
++						Offset:      index * 32,
++						Chunknum:    uint8(index),
++						Mode:        int(mode),
++					}
++					err = dfs.Client.Call("DFSServerInstance.Read", args, &reply)
++					if err != nil {
++						// Remove write access
++						var reply shared.Reply
++						args := &shared.Args{
++							Filename: fname,
++						}
++						err = dfs.Client.Call("DFSServerInstance.RemoveAccess", args, &reply)
++						return nil, ChunkUnavailableError(index)
++					}
++
++					// Save chunk to file
++					_, err = fileToChange.WriteAt(reply.Chunk[:], int64(args.Offset))
++					if err != nil {
++					}
++					// Save read part to disk
++					fileToChange.Sync()
++				}
++			}
++
++			// update versioning of local file
++			reply = shared.Reply{}
++			args = &shared.Args{
++				Filename:  fname,
++				LocalPath: dfs.LocalPath,
++			}
++			_ = dfs.Client.Call("DFSServerInstance.Open", args, &reply)
++			versions = reply.Versions
++
++			// Close the file to prevent opening twice
++			fileToChange.Close()
++		}
++	}
++
++	// Return instance of file
++	file, err = os.OpenFile(fullFilename, os.O_RDWR, 0644)
++	if err != nil {
++		// Remove write access
++		var reply shared.Reply
++		args := &shared.Args{
++			Filename: fname,
++		}
++		err = dfs.Client.Call("DFSServerInstance.RemoveAccess", args, &reply)
++		return nil, FileDoesNotExistError(fname)
++	}
++
++	openFile := &OpenFile{
++		Name:      fname,
++		File:      file,
++		Mode:      mode,
++		Connected: dfs.Connected,
++		Server:    dfs.ServerAddr,
++		Versions:  versions,
++		Client:    dfs.Client,
++		LocalPath: dfs.LocalPath,
++	}
++
++	dfs.FilesOpened = append(dfs.FilesOpened, openFile)
+ 
+ 	return openFile, nil
+ }
+@@ -494,29 +497,29 @@ func (dfs *DFSInstance) UMountDFS() (err error) {
+ 		return DisconnectedError(dfs.ServerAddr)
+ 	}
+ 
+-    // Close open files
+-    if dfs.FilesOpened != nil {
+-        for _,f := range(dfs.FilesOpened){
+-            f.File.Close()
+-        }
+-    }
+-    dfs.FilesOpened = nil
++	// Close open files
++	if dfs.FilesOpened != nil {
++		for _, f := range dfs.FilesOpened {
++			f.File.Close()
++		}
++	}
++	dfs.FilesOpened = nil
+ 
+-    if dfs.Connected {
+-        var reply shared.Reply
+-        args := &shared.Args{
+-            LocalPath: dfs.LocalPath,
+-        }
+-        // Remove all writing access
+-        err = dfs.Client.Call("DFSServerInstance.RemoveAccess", args, &reply)
++	if dfs.Connected {
++		var reply shared.Reply
++		args := &shared.Args{
++			LocalPath: dfs.LocalPath,
++		}
++		// Remove all writing access
++		err = dfs.Client.Call("DFSServerInstance.RemoveAccess", args, &reply)
+ 
+-        // Change clients to disconnected and break RPC connections
+-        err = dfs.Client.Call("DFSServerInstance.UMountDFS", args, &reply)
++		// Change clients to disconnected and break RPC connections
++		err = dfs.Client.Call("DFSServerInstance.UMountDFS", args, &reply)
+ 
+-        // Close connections
+-        dfs.Client.Close()
+-        dfs.Heartbeat.Close()
+-    }
++		// Close connections
++		dfs.Client.Close()
++		dfs.Heartbeat.Close()
++	}
+ 
+ 	return nil
+ }
+@@ -543,12 +546,12 @@ func (f *OpenFile) Read(chunkNum uint8, chunk *Chunk) (err error) {
+ 		return DisconnectedError(f.Server)
+ 	}
+ 
+-    // File can only have 256 chunks
+-    if int(chunkNum) < 0 || int(chunkNum) > 255 {
+-        return ChunkUnavailableError(chunkNum)
+-    }
++	// File can only have 256 chunks
++	if int(chunkNum) < 0 || int(chunkNum) > 255 {
++		return ChunkUnavailableError(chunkNum)
++	}
+ 
+-    // Get offset into file
++	// Get offset into file
+ 	seek := int64(chunkNum * 32)
+ 
+ 	// if dread mode read from file
+@@ -566,10 +569,10 @@ func (f *OpenFile) Read(chunkNum uint8, chunk *Chunk) (err error) {
+ 			Chunknum: chunkNum,
+ 		}
+ 		err = f.Client.Call("DFSServerInstance.LatestVersion", args, &reply)
+-        //fmt.Printf("LATEST VERSION ON SERVER:%d, OUR VERSION:%d\n", reply.Version, f.Versions[int(chunkNum)]) //delete
++		fmt.Printf("LATEST VERSION ON SERVER:%d, OUR VERSION:%d\n", reply.Version, f.Versions[int(chunkNum)]) //delete
+ 
+ 		// If it does, get chunk from server
+-		if reply.Version > f.Versions[int(chunkNum)]{
++		if reply.Version > f.Versions[int(chunkNum)] {
+ 			var reply shared.Reply
+ 			args := &shared.Args{
+ 				Filename:    f.Name,
+@@ -582,7 +585,7 @@ func (f *OpenFile) Read(chunkNum uint8, chunk *Chunk) (err error) {
+ 			// Get Chunk
+ 			err = f.Client.Call("DFSServerInstance.Read", args, &reply)
+ 			if err != nil {
+-			    //fmt.Printf("1. chunk unavailable error:%s\n", err) //delete
++				fmt.Printf("1. chunk unavailable error:%s\n", err) //delete
+ 				return ChunkUnavailableError(chunkNum)
+ 			}
+ 
+@@ -593,32 +596,32 @@ func (f *OpenFile) Read(chunkNum uint8, chunk *Chunk) (err error) {
+ 				//fmt.Println("Error occured writing chunk to file")
+ 			}
+ 			// Save read part to disk
+-			f.File.Truncate(int64(256 * 32))
++			//f.File.Truncate(int64(256 * 32))
+ 			f.File.Sync()
+ 		}
+ 	}
+ 
+ 	n, err := f.File.ReadAt(chunk[:], seek)
+-    count := 0
++	count := 0
+ 	if err != nil {
+-        for _, byte := range chunk[:] {
+-            if byte != 0 {
+-                count += 1
+-            }
+-        }
+-        // Chunk is empty
+-        if n == 0 && count == 0{
+-            return nil
+-        }
+-        
+-        // Chunk is not empty but we reached EOF
+-        if count > 0 {
+-            _,err := f.File.ReadAt(chunk[:count], seek)
+-            if err != nil {
+-                return nil
+-            }
+-            
+-        }
++		for _, byte := range chunk[:] {
++			if byte != 0 {
++				count += 1
++			}
++		}
++		// Chunk is empty
++		if n == 0 && count == 0 {
++			return nil
++		}
++
++		// Chunk is not empty but we reached EOF
++		if count > 0 {
++			_, err := f.File.ReadAt(chunk[:count], seek)
++			if err != nil {
++				return nil
++			}
++
++		}
+ 		return ChunkUnavailableError(chunkNum)
+ 	}
+ 	return nil
+@@ -646,7 +649,7 @@ func (f *OpenFile) Write(chunkNum uint8, chunk *Chunk) (err error) {
+ 
+ 	// Update log that it needs to write
+ 	ext := fmt.Sprintf("%s.dfs", "log")
+-    log := filepath.Join(f.LocalPath, ext)
++	log := filepath.Join(f.LocalPath, ext)
+ 	logFile, err := os.OpenFile(log, os.O_APPEND|os.O_RDWR, 0644)
+ 	defer logFile.Close()
+ 	if err != nil {
+@@ -685,7 +688,7 @@ func (f *OpenFile) Write(chunkNum uint8, chunk *Chunk) (err error) {
+ 	err = f.Client.Call("DFSServerInstance.UpdateChunkVersion", args, &reply)
+ 
+ 	// Update self
+-    version := reply.Version
++	version := reply.Version
+ 	newVersions := f.Versions
+ 	newVersions[int(chunkNum)] = version
+ 	f.Versions = newVersions
+@@ -705,15 +708,15 @@ func (f *OpenFile) Close() (err error) {
+ 		return DisconnectedError(f.Server)
+ 	}
+ 
+-    if (f.Mode == WRITE && f.Connected) {
+-        var reply shared.Reply
+-        args := &shared.Args{
+-            Filename:  f.Name,
+-            LocalPath: f.LocalPath,
+-        }
+-        // If WRITE, remove writing access block
+-        err = f.Client.Call("DFSServerInstance.RemoveAccess", args, &reply)
+-    }
++	if f.Mode == WRITE && f.Connected {
++		var reply shared.Reply
++		args := &shared.Args{
++			Filename:  f.Name,
++			LocalPath: f.LocalPath,
++		}
++		// If WRITE, remove writing access block
++		err = f.Client.Call("DFSServerInstance.RemoveAccess", args, &reply)
++	}
+ 
+ 	f.File.Close()
+ 	return nil
+@@ -754,11 +757,11 @@ func MountDFS(serverAddr string, localIP string, localPath string) (dfs DFS, err
+ 
+ 	// Get addresses
+ 	server, _ := net.ResolveTCPAddr("tcp", serverAddr)
+-    formatted := fmt.Sprintf("%s:0", localIP)
++	formatted := fmt.Sprintf("%s:0", localIP)
+ 	local, err := net.ResolveTCPAddr("tcp", formatted)
+ 
+ 	// Connect to the server, ignore connection errors
+-    //fmt.Printf("These are the things: local:%s, server:%s\n", local, server)
++	//fmt.Printf("These are the things: local:%s, server:%s\n", local, server)
+ 	conn, err := net.DialTCP("tcp", local, server)
+ 
+ 	var dfsClient *DFSInstance
+@@ -776,8 +779,8 @@ func MountDFS(serverAddr string, localIP string, localPath string) (dfs DFS, err
+ 		rpcServer := rpc.NewServer()
+ 		rpcServer.Register(dfsInstance)
+ 
+-        //str := fmt.Sprintf("%s:0", localIP) 
+-        //hhp, err := net.ResolveTCPAddr("tcp", str)
++		//str := fmt.Sprintf("%s:0", localIP)
++		//hhp, err := net.ResolveTCPAddr("tcp", str)
+ 		listener, err := net.ListenTCP("tcp", local)
+ 		if err != nil {
+ 			//fmt.Println("Error occurred listening to rpc client: ", err) //delete connected = false
+@@ -814,7 +817,7 @@ func MountDFS(serverAddr string, localIP string, localPath string) (dfs DFS, err
+ 		var reply shared.Reply
+ 		args := &shared.Args{
+ 			LocalPath:  localPath,
+-			Addr:       addr.String(),
++			Addr:       listener.Addr().String(),
+ 			ServerAddr: serverAddr,
+ 		}
+ 		err = dfsClient.Client.Call("DFSServerInstance.Mount", args, &reply)
+diff --git a/server.go b/server.go
+index f21845e..813a8a0 100644
+--- a/server.go
++++ b/server.go
+@@ -3,11 +3,13 @@ package main
+ import (
+ 	"encoding/json"
+ 	"errors"
++	"fmt"
+ 	//"fmt"
+ 	"log"
+ 	"net"
+ 	"net/rpc"
+ 	"os"
++	"sync"
+ 	"time"
+ 
+ 	"./shared"
+@@ -30,6 +32,8 @@ const (
+ 	DREAD
+ )
+ 
++var mutex = &sync.Mutex{}
++
+ func main() {
+ 	// check that command line args present
+ 	args := os.Args[1:]
+@@ -46,11 +50,11 @@ func main() {
+ 	dfs.ClientFiles = make(map[string][]*shared.FileMetadata)
+ 	dfs.FileVersions = make(map[string][256]int)
+ 	dfs.Files = make(map[string][]string)
+-	dfs.Heartbeat = make(map[string]time.Time)
++	dfs.Heartbeat = make(map[string]int64)
+ 	dfs.HeartbeatDisconnected = make(map[string]bool)
+ 	dfs.Originals = make(map[string][]string)
+-    dfs.ClientsWriting = make(map[string]string)
+-    dfs.Clients = make(map[string]*rpc.Client)
++	dfs.ClientsWriting = make(map[string]string)
++	dfs.Clients = make(map[string]*rpc.Client)
+ 
+ 	addr := os.Args[1]
+ 	// Create heartbeat server in another goroutine
+@@ -58,13 +62,14 @@ func main() {
+ 	heartbeat, _ := net.ListenUDP("udp", serverAddr)
+ 	dfs.HeartbeatServer = heartbeat
+ 	go UDPHeartbeatListener(heartbeat, dfs)
++	go checkHeartbeats(dfs)
+ 
+ 	// Get address of client-incoming ip:port
+ 	//fmt.Printf("\nListening for clients at:%v...\n", addr)
+-    tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+-    if err != nil{
+-        //fmt.Println("Problem resolvin addr:%s\n", addr)
+-    }
++	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
++	if err != nil {
++		//fmt.Println("Problem resolvin addr:%s\n", addr)
++	}
+ 
+ 	listener, err := net.ListenTCP("tcp", tcpAddr)
+ 	if err != nil {
+@@ -84,40 +89,49 @@ func main() {
+ // Listen for heartbeats
+ func UDPHeartbeatListener(listener *net.UDPConn, dfs *DFSServerInstance) {
+ 	buffer := make([]byte, 1024)
++
+ 	for {
++		var heartbeat shared.Heartbeat
++
+ 		size, _ := listener.Read(buffer[0:])
+-		if len(buffer) > 0 {
++		if size > 0 {
+ 			//fmt.Printf("Buffer contents:%s, size:%d\n", buffer, len(buffer))
+-			ReportHeartbeat(buffer[:size], dfs)
++
++			// Get new heartbeat
++			_ = json.Unmarshal(buffer, &heartbeat)
++
++			// Save new heartbeat time
++			newHeartbeat := heartbeat.TimeSent
++			mutex.Lock()
++			dfs.Heartbeat[heartbeat.LocalPath] = newHeartbeat
++			mutex.Unlock()
+ 		}
+ 	}
+ }
+ 
+-// Reports heartbeats and updates server
+-func ReportHeartbeat(buffer []byte, dfs *DFSServerInstance) {
+-	var heartbeat shared.Heartbeat
+-
+-	_ = json.Unmarshal(buffer, &heartbeat)
+-
+-	// Get previous heartbeat time
+-	lastHeartbeat := dfs.Heartbeat[heartbeat.LocalPath]
+-
+-	// Save new heartbeat time
+-	newHeartbeat := heartbeat.TimeSent
+-	dfs.Heartbeat[heartbeat.LocalPath] = newHeartbeat
+-
+-	// Get time difference
+-	duration := newHeartbeat.Sub(lastHeartbeat)
+-	if duration > 2 {
+-		//fmt.Printf("DISCONNECTED CLIENT %v\n", heartbeat.LocalPath)
+-		dfs.ConnectedClients[heartbeat.LocalPath] = "Disconnected"
+-		dfs.HeartbeatDisconnected[heartbeat.LocalPath] = true
+-        // Remove write access
+-        filename, exists := dfs.ClientsWriting[heartbeat.LocalPath]
+-        if exists {
+-            delete(dfs.ClientsWriting, heartbeat.LocalPath)
+-            delete(dfs.Access, filename)
+-        }
++func checkHeartbeats(dfs *DFSServerInstance) {
++	// Check if disconnect longer than 2 seconds
++	for {
++		for key, value := range dfs.Heartbeat {
++			if value != 0 {
++				// Get time difference
++				current := time.Now().UnixNano()
++				if current-value > int64(2*time.Second) {
++					fmt.Printf("DISCONNECTED CLIENT %v\n", key)
++					dfs.ConnectedClients[key] = "Disconnected"
++					dfs.HeartbeatDisconnected[key] = true
++					delete(dfs.Heartbeat, key)
++
++					// Remove write access
++					filename, exists := dfs.ClientsWriting[key]
++					if exists {
++						delete(dfs.ClientsWriting, key)
++						delete(dfs.Access, filename)
++					}
++				}
++			}
++		}
++		time.Sleep(2 * time.Second)
+ 	}
+ }
+ 
+@@ -132,11 +146,11 @@ type DFSServerInstance struct {
+ 	FileVersions          map[string][256]int               // Files with list of their versions
+ 	Files                 map[string][]string               // What files are in network and what client has them
+ 	Client                *rpc.Client                       // Client to send rpc to other Clients
+-    Clients               map[string]*rpc.Client
+-	Heartbeat             map[string]time.Time              // Client's latest heartbeat
+-	HeartbeatDisconnected map[string]bool                   //Records whether client disconnected
++	Clients               map[string]*rpc.Client
++	Heartbeat             map[string]int64 // Client's latest heartbeat
++	HeartbeatDisconnected map[string]bool  //Records whether client disconnected
+ 	HeartbeatServer       *net.UDPConn
+-    ClientsWriting        map[string]string
++	ClientsWriting        map[string]string
+ }
+ 
+ func NewDFSServerInstance() *DFSServerInstance {
+@@ -155,8 +169,8 @@ func (d *DFSServerInstance) Mount(args *shared.Args, reply *shared.Reply) (err e
+ 		connected = false
+ 	}
+ 
+-    //d.Client = conn
+-    d.Clients[args.LocalPath] = conn
++	//d.Client = conn
++	d.Clients[args.LocalPath] = conn
+ 
+ 	// TODO find an empty disconnected Client slot number
+ 	// Good to have but dw about this for now - max num of clients in assgmt is 16
+@@ -170,10 +184,10 @@ func (d *DFSServerInstance) Mount(args *shared.Args, reply *shared.Reply) (err e
+ 	}
+ 
+ 	// Remove old data if client has mounted before
+-    delete(d.Access, args.LocalPath)
+-    delete(d.Heartbeat, args.LocalPath)
+-    delete(d.ClientsWriting, args.LocalPath)
+-    delete(d.HeartbeatDisconnected, args.LocalPath)
++	delete(d.Access, args.LocalPath)
++	delete(d.Heartbeat, args.LocalPath)
++	delete(d.ClientsWriting, args.LocalPath)
++	delete(d.HeartbeatDisconnected, args.LocalPath)
+ 
+ 	if !connected {
+ 		d.ConnectedClients[client.LocalPath] = "Disconnected"
+@@ -190,25 +204,25 @@ func (d *DFSServerInstance) Mount(args *shared.Args, reply *shared.Reply) (err e
+ }
+ 
+ func (d *DFSServerInstance) RemoveAccess(args *shared.Args, reply *shared.Reply) (err error) {
+-    localPath,_ := d.Access[args.Filename]
++	localPath, _ := d.Access[args.Filename]
+ 	delete(d.Access, args.Filename)
+-    delete(d.ClientsWriting, localPath)
++	delete(d.ClientsWriting, localPath)
+ 	return nil
+ }
+ 
+ // If file is already being written to, return false
+ // Else return true and update server to know it's being written to
+ func (d *DFSServerInstance) Writeable(args *shared.Args, reply *shared.Reply) (err error) {
+-    writer := d.Access[args.Filename]
+-	if len(d.Access[args.Filename]) > 0  && writer != args.LocalPath{
+-        //fmt.Printf("File %f is not writable, being written to by %s\n", args.Filename, writer)
++	writer := d.Access[args.Filename]
++	if len(d.Access[args.Filename]) > 0 && writer != args.LocalPath {
++		//fmt.Printf("File %f is not writable, being written to by %s\n", args.Filename, writer)
+ 		reply.Writeable = false
+ 	} else {
+ 		reply.Writeable = true
+ 		//Tell server we're writing
+ 		if args.Mode == int(WRITE) {
+ 			d.Access[args.Filename] = args.LocalPath
+-            d.ClientsWriting[args.LocalPath] = args.Filename
++			d.ClientsWriting[args.LocalPath] = args.Filename
+ 		}
+ 	}
+ 	return nil
+@@ -227,7 +241,7 @@ func (d *DFSServerInstance) UpdateChunkVersion(args *shared.Args, reply *shared.
+ 		}
+ 	}
+ 	ver := file.Versions
+-    version := ver[int(args.Chunknum)]
++	version := ver[int(args.Chunknum)]
+ 	ver[int(args.Chunknum)] = version + 1
+ 
+ 	newFile := &shared.FileMetadata{
+@@ -248,7 +262,7 @@ func (d *DFSServerInstance) UpdateChunkVersion(args *shared.Args, reply *shared.
+ 	newVersions[int(args.Chunknum)] = version + 1
+ 	d.FileVersions[args.Filename] = newVersions
+ 
+-    reply.Version = version+1
++	reply.Version = version + 1
+ 	return nil
+ }
+ 
+@@ -311,6 +325,7 @@ func (d *DFSServerInstance) UpdateServer(args *shared.Args, reply *shared.Reply)
+ 
+ // Returns chunk of file read or error
+ func (d *DFSServerInstance) Read(args *shared.Args, reply *shared.Reply) (err error) {
++	fmt.Printf("read call received by server\n")
+ 	//Get latest version of chunk
+ 	versions := d.FileVersions[args.Filename]
+ 	chunkVersion := versions[int(args.Chunknum)]
+@@ -320,6 +335,8 @@ func (d *DFSServerInstance) Read(args *shared.Args, reply *shared.Reply) (err er
+ 	clients := d.Files[args.Filename]
+ 	var vers int
+ 	if args.Mode == int(READ) {
++		fmt.Printf("The mode is read\n")
++		fmt.Printf("Connectedclients:%v\n", d.ConnectedClients)
+ 		// Always has to return the latest version
+ 		for _, client := range clients {
+ 			if d.ConnectedClients[client] == "Connected" && client != args.LocalPath {
+@@ -327,7 +344,9 @@ func (d *DFSServerInstance) Read(args *shared.Args, reply *shared.Reply) (err er
+ 				for _, file := range files {
+ 					if file.Name == args.Filename {
+ 						if file.Versions[int(args.Chunknum)] == chunkVersion {
++							vers = chunkVersion
+ 							winner = client
++							fmt.Printf("winner = %s\n", winner)
+ 							break
+ 						}
+ 					}
+@@ -356,16 +375,16 @@ func (d *DFSServerInstance) Read(args *shared.Args, reply *shared.Reply) (err er
+ 	if vers == 0 {
+ 		return errors.New("Error because no trivial chunks allowed.")
+ 	}
++	fmt.Printf("version:%d\n", d)
+ 
+ 	if winner == "" {
+ 		return errors.New("Error because no clients found.")
+ 	}
++	fmt.Printf("winner:%s\n", winner)
+ 
+ 	// Get chunk from client
+ 	host := d.ClientInfo[winner]
+ 
+-
+-
+ 	var clientReply shared.Reply
+ 	clientArgs := &shared.Args{
+ 		Filename:    args.Filename,
+@@ -374,8 +393,8 @@ func (d *DFSServerInstance) Read(args *shared.Args, reply *shared.Reply) (err er
+ 		Offset:      args.Offset,
+ 	}
+ 
+-    rpcConnection, _ := d.Clients[args.LocalPath]
+-	err = rpcConnection.Call("DFSServerInstance.GetChunk", clientArgs, &clientReply)
++	rpcConnection, _ := d.Clients[args.LocalPath]
++	err = rpcConnection.Call("ClientInstance.GetChunk", clientArgs, &clientReply)
+ 	if err != nil {
+ 		return errors.New("Could not retrieve chunk from client")
+ 	}
+@@ -447,11 +466,13 @@ func (d *DFSServerInstance) GlobalFileExists(args *shared.Args, reply *shared.Re
+ 
+ // Return true if client with file exists otherwise false
+ func (d *DFSServerInstance) ClientFilesOnline(args *shared.Args, reply *shared.Reply) (err error) {
++	fmt.Printf("connected clients:%v\n", d.ConnectedClients)
+ 	clients := d.Files[args.Filename]
+ 	exists := false
+ 	if len(clients) > 0 {
+ 		for _, client := range clients {
+-			if d.ConnectedClients[client] == "Connected" {
++			if d.ConnectedClients[client] == "Connected" && client != args.LocalPath {
++				fmt.Printf("client with this file is online:%s\n", client)
+ 				exists = true
+ 				break
+ 			}
+@@ -462,12 +483,13 @@ func (d *DFSServerInstance) ClientFilesOnline(args *shared.Args, reply *shared.R
+ }
+ 
+ func (d *DFSServerInstance) UMountDFS(args *shared.Args, reply *shared.Reply) (err error) {
++	if d.ConnectedClients[args.LocalPath] == "Connected" {
++		d.HeartbeatServer.Close()
++		client := d.Clients[args.LocalPath]
++		client.Close()
++		delete(d.Heartbeat, args.LocalPath)
++		//d.Client.Close()
++	}
+ 	d.ConnectedClients[args.LocalPath] = "Disconnected"
+-    if (d.ConnectedClients[args.LocalPath] == "Connected") {
+-        d.HeartbeatServer.Close()
+-        client := d.Clients[args.LocalPath]
+-        client.Close()
+-        //d.Client.Close()
+-    }
+ 	return nil
+ }
+diff --git a/shared/shared.go b/shared/shared.go
+index 66d7949..8dbd71a 100644
+--- a/shared/shared.go
++++ b/shared/shared.go
+@@ -1,7 +1,5 @@
+ package shared
+ 
+-import "time"
+-
+ type Args struct {
+ 	LocalPath   string
+ 	Addr        string
+@@ -30,7 +28,7 @@ type Reply struct {
+ 
+ type Heartbeat struct {
+ 	LocalPath string
+-	TimeSent  time.Time
++	TimeSent  int64
+ }
+ 
+ // Information about Files
+-- 
+2.6.2
+
